@@ -31,13 +31,52 @@ jobs:
       - name: Configurar SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_KEY }}" | tr -d '\r' > ~/.ssh/private_key.pem
+          # Asegurar que el secret se guarda con el formato correcto
+          echo "${{ secrets.EC2_KEY }}" | sed 's/\\n/\n/g' > ~/.ssh/private_key.pem
           chmod 600 ~/.ssh/private_key.pem
           eval "$(ssh-agent -s)"
           ssh-add ~/.ssh/private_key.pem
-          
+
       - name: Desplegar en EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
         run: |
-          ssh -v -i ~/.ssh/private_key.pem \
-            -o StrictHostKeyChecking=accept-new \
-            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash /app/deploy.sh' 
+          ssh -i ~/.ssh/private_key.pem -o StrictHostKeyChecking=accept-new $EC2_USER@$EC2_HOST '
+            cd ~/AI4Devs-pipeline
+            
+            echo "Pulling latest changes..."
+            git pull origin main
+            
+            echo "Checking for backend dependency changes..."
+            cd backend
+            if [ -f package-lock.json ]; then
+              if ! cmp -s package-lock.json package-lock.json.bak; then
+                echo "Dependencies changed, running npm install..."
+                npm install
+                cp package-lock.json package-lock.json.bak
+              else
+                echo "No backend dependency changes."
+              fi
+            fi
+            
+            echo "Checking for frontend changes..."
+            cd ../frontend
+            if [ -d build ]; then
+              echo "Skipping frontend build (already exists)."
+            else
+              echo "Building frontend..."
+              npm install
+              npm run build
+            fi
+            
+            echo "Restarting backend..."
+            cd ../backend
+            if pm2 list | grep -q backend; then
+              pm2 restart backend
+            else
+              pm2 start npm --name "backend" -- run start
+            fi
+            
+            echo "Deployment successful!"
+          ' 
